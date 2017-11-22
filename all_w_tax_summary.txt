@@ -1,0 +1,44 @@
+Num samples: 29
+Num observations: 1215
+Total count: 217016
+Table density (fraction of non-zero values): 0.183
+
+Counts/sample summary:
+ Min: 17.0
+ Max: 33059.0
+ Median: 8151.000
+ Mean: 7483.310
+ Std. dev.: 6084.039
+ Sample Metadata Categories: None provided
+ Observation Metadata Categories: taxonomy
+
+Counts/sample detail:
+NegC2: 17.0
+ExtractionBlank2: 22.0
+ExtractionBlank1: 87.0
+NegC3: 284.0
+NegC1: 329.0
+ExtractionBlank4: 370.0
+ExtractionBlank3: 1116.0
+G4044: 6350.0
+G4047: 6994.0
+Mat.D.0h: 7136.0
+G4037: 7211.0
+Mat.D.24h: 7701.0
+G4038: 7923.0
+G4048: 8105.0
+Mat.B.24h: 8151.0
+G4043: 8202.0
+G4045: 8296.0
+PosC1: 8384.0
+Mat.B.0h: 8907.0
+G4039: 8940.0
+Mat.C.24h: 9096.0
+PosC2: 9373.0
+G4042: 9590.0
+G4046: 9825.0
+Mat.A.24h: 9960.0
+G4040: 10321.0
+Mat.A.0h: 10627.0
+G4041: 10640.0
+Mat.C.0h: 33059.0

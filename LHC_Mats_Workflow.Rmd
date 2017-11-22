@@ -1,0 +1,240 @@
+---
+title: Environmental and Biological Influences on Carbonate Precipitation within Hot
+  Spring Microbial Mats in Little Hot Creek, CA
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+
+First, data are processed using QIIME and deblur within BASH. 
+
+You will need the initial mapping file for QC, as well as the analysis mapping (Both included in supplementary data on the github repo) file to recreate this analysis. Raw sequence data are avalible at SRX2830741- this dataset was also a part of the same sequencing run represented in Bradley, Daille, and Trivedi et. al 2017 where the accession originates. 
+
+Software used: 
+- QIIME 1.9.1 (https://github.com/biocore/qiime)
+- Deblur 1.0.1 (https://github.com/biocore/deblur)
+- Mothur (https://github.com/mothur/mothur)
+- All dependencies for the above software
+
+I ran QIIME and Deblur in separate virtual environments, so you'll see me activate and deactivate them within this script. Also, raw sequence data were stored in a folder named "seq/", so you'll need to create this, and place the raw reads inside of it to totally recreate this analysis.
+
+```{bash}
+source activate qiime1
+```
+
+The first block will join paired-end sequencing reads, extract sequence data from the resulting file, ready for input into split_libraries_fastq.py
+
+```{bash}
+join_paired_ends.py -f seq/GB2015-AMP_S1_L001_R1_001.fastq -r seq/GB2015-AMP_S1_L001_R2_001.fastq -o seq/Join/ -j 100
+extract_barcodes.py -a -m ControlMap.txt -l 12 -f seq/Join/fastqjoin.join.fastq -o seq/Prepped/
+```
+
+Onto demultiplexing. A minimum q-score of 20 was set to limit erronous basecalling as an issue downstream with deblur. Post split libraries the histograms were inspected, and a trim length of 290 bp was chosen for deblur. This length is a tradeoff for sequencing depth and taxonomic resolution. Greater than 90 percent of all reads were recovered post QC for entry into the deblur workflow.
+
+```{bash}
+split_libraries_fastq.py --barcode_type 12 -i seq/Prepped/reads.fastq -b seq/Prepped/barcodes.fastq -m ControlMap.txt -q 25 -o seq/SlOut/
+```
+
+
+Deactivate qiime and activate the deblur environment
+
+```{bash}
+source deactivate qiime1
+source activate deblurenv
+```
+
+
+Run deblur. My workstation has 16 cores, but set this accordingly. I used the SILVA 128 database as a positive reference, and the deblur "artifacts.fa" as a negative filtering reference. Post deblur I used the "all.biom/all.seqs.fa", as I was planning on filtering by taxonomy anyway. I manually added the "artifacts.fa" file into my directory from the deblur github page - https://raw.githubusercontent.com/biocore/deblur/master/deblur/support_files/artifacts.fa . 
+
+```{bash}
+deblur workflow --seqs-fp seq/SlOut/seqs.fna --output-dir DeblurOut/ -t 290 --neg-ref-fp artifacts.fa --pos-ref-fp /media/analyses/DB/SILVA_128_QIIME_release/rep_set/rep_set_all/99/99_otus.fasta -a 16 -O 16
+```
+
+Reactivate QIIME
+```{bash}
+source deactivate deblurenv
+source activate qiime1
+```
+
+Next, taxonomy will be assigned to each sOTU using mothur, within QIIME. 
+
+```{bash}
+assign_taxonomy.py -m mothur -t /media/analyses/DB/silva.nr_v128.tax -r /media/analyses/DB/silva.nr_v128.align -o DeblurOut/mothur_taxonomy/ -i DeblurOut/all.seqs.fa
+```
+
+The next few steps are for initial BIOM file generation and filtering of contaminant sequences. I limited the control OTU table to samples with at least 100 sequences to ensure that I could get a representative “contaminated” core microbiome. All extraction blanks and filtration blanks were identified within the "SampleSite" metadata category as "Control" within my mapping file.
+
+```{bash}
+biom add-metadata --sc-separated taxonomy --observation-header OTUID,taxonomy --observation-metadata-fp DeblurOut/mothur_taxonomy/all.seqs_tax_assignments.txt -i DeblurOut/all.biom -o DeblurOut/all_w_tax.biom 
+
+filter_samples_from_otu_table.py -m ControlMap.txt -s 'SampleSite:Control' -n 100 -o DeblurOut/Control.biom -i DeblurOut/all_w_tax.biom
+compute_core_microbiome.py --min_fraction_for_core 0.25 --max_fraction_for_core 0.75 -i DeblurOut/Control.biom -o ControlCore/
+```
+A filter file was created from the SVs found to be in 50 percent of my controls. This should be a pretty conservative filter of the most abundant contaminants found across my samples. 
+```{bash}
+filter_otus_from_otu_table.py -e ControlCore/core_otus_50.txt -s 3 -n 1 -i DeblurOut/all_w_tax.biom  -o DeblurOut/PostControlFilter.biom
+filter_samples_from_otu_table.py --sample_id_fp map.txt -n 500 -i DeblurOut/PostControlFilter.biom -o DeblurOut/Analysis.biom
+```
+
+Before moving on, I want to generate some summaries to see how many sequences I have left overall, and how many SVs were retained/removed after filtering.
+
+```{bash}
+biom summarize-table -i DeblurOut/all_w_tax.biom -o all_w_tax_summary.txt
+biom summarize-table -i DeblurOut/PostControlFilter.biom -o PostControlFilter_summary.txt
+biom summarize-table -i DeblurOut/Analysis.biom -o Analysis_summary.txt
+```
+
+What does this look like? 
+
+Unfiltered BIOM, post clustering: 1215 sOTUs, 217016 Sequences
+Post contaminant filtration: 946 sOTUs, 211242 Sequences (77.9 %, 97.3 %)
+Post removal of control samples: 946 sOTUs, 193325 Sequences (77.9 %, 89.1 %)
+
+Next, I'll add sample metadata to each file, and then convert my two analysis BIOM files to JSON format for use in Phyloseq/R
+
+```{bash}
+biom add-metadata -i DeblurOut/Analysis.biom -o DeblurOut/Analysis.w_md.biom --sample-metadata-fp map.txt
+biom convert -i DeblurOut/Analysis.w_md.biom -o DeblurOut/Analysis.w_md.json.biom --table-type="OTU table" --to-json
+```
+
+I want to make sure none of my sequences are chimeric- as it turns out, none are, but I ran chimera checking to show this. From this point on I'll continue to use the "Analysis.w_md.json.biom" file. Last step before moving into R. Generation of phylogenetic trees for use in Phyloseq, as needed. 
+
+```{bash}
+filter_fasta.py -b DeblurOut/Analysis.biom -f DeblurOut/all.seqs.fa -o DeblurOut/Analysis.seqs.fa
+
+identify_chimeric_seqs.py -m usearch61 --threads 16 -i DeblurOut/Analysis.seqs.fa -r /media/analyses/DB/gold.fasta -o DeblurOut/usearch61_chimeras/
+
+filter_fasta.py -f DeblurOut/Analysis.seqs.fa -o DeblurOut/Analysis.seqs.nochimeras.fa -s DeblurOut/usearch61_chimeras/non_chimeras.txt
+
+filter_otus_from_otu_table.py -i DeblurOut/Analysis.w_md.json.biom -o DeblurOut/Analysis.w_md.nochimera.json.biom -e DeblurOut/usearch61_chimeras/chimeras.txt
+
+```
+
+```{bash}
+align_seqs.py -i DeblurOut/Analysis.seqs.fa -t /media/analyses/DB/SILVA_128_QIIME_release/rep_set_aligned/97/97_otus_aligned.fasta -o DeblurOut/Analysis_RepSet_Aligned/
+
+filter_alignment.py -i DeblurOut/Analysis_RepSet_Aligned/Analysis.seqs_aligned.fasta -o DeblurOut/Analysis_RepSet_Aligned/ -e 0.001
+
+make_phylogeny.py -i DeblurOut/Analysis_RepSet_Aligned/Analysis.seqs_aligned_pfiltered.fasta -o DeblurOut/Analysis.tre
+
+```
+
+
+Onto R. 
+Load Needed Libraries
+```{r}
+library(phyloseq)
+library(cowplot)
+library(ampvis)
+```
+
+First, I'm going to import the separated Bacterial/Archaeal, and Eukaryotic datasets from QIIME. 
+
+```{r}
+LHC <- import_biom("Analysis.w_md.json.biom", "Analysis.tre", "Analysis.seqs.fa", parseFunction=parse_taxonomy_default)
+```
+Before Continuing, the SILVA Taxonomy needs to be correctly formatted for use in AmpVis/Phyloseq
+
+```{r}
+colnames(tax_table(LHC)) = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+```
+
+As a small step, any chloroplast and mitochondial sequence need to be removed from the phyloseq object.
+
+```{r}
+LHC.Filter <- LHC %>%
+    subset_taxa(
+            Family  != "mitochondria" &
+            Class   != "Chloroplast")
+```
+
+I'm going to convert to relative abundances for some chart types. RA standing for "Relative Abundance"
+```{r}
+LHC.RA <- transform_sample_counts(LHC.Filter, function(x) x / sum(x) * 100)
+```
+
+Next, I'm going to rarefy the table for later use. 
+```{r}
+LHC.Rare <- rarefy_even_depth(LHC.Filter, sample.size = 6350, rngseed = 712)
+```
+I need to subset the primary table to remove the incubations before proceeding. Also, I'll go ahead and make a heatmap for the incubations, and show that there was no significant difference between treatments. 
+
+```{r}
+LHC.RA.Mat <- subset_samples(LHC.RA, SampleName %in% c("LHC15.1.A.M1","LHC15.1.A.M2","LHC15.1.A.M3","LHC15.1.B.M1","LHC15.1.B.M2","LHC15.1.B.M3","LHC15.1.C.M1","LHC15.1.C.M2","LHC15.1.C.M3","LHC15.1.D.M1","LHC15.1.D.M2","LHC15.1.D.M3"))
+LHC.Rare.Mat <- subset_samples(LHC.Rare, SampleName %in% c("LHC15.1.A.M1","LHC15.1.A.M2","LHC15.1.A.M3","LHC15.1.B.M1","LHC15.1.B.M2","LHC15.1.B.M3","LHC15.1.C.M1","LHC15.1.C.M2","LHC15.1.C.M3","LHC15.1.D.M1","LHC15.1.D.M2","LHC15.1.D.M3"))
+LHC.RA.Incubation <- subset_samples(LHC.RA, SampleName %in% c("Mat A 0h","Mat A 24h","Mat B 0h","Mat B 24h","Mat C 0h","Mat C 24h","Mat D 0h","Mat D 24h"))
+LHC.Rare.Incubation <- subset_samples(LHC.Rare, SampleName %in% c("Mat A 0h","Mat A 24h","Mat B 0h","Mat B 24h","Mat C 0h","Mat C 24h","Mat D 0h","Mat D 24h"))
+```
+
+Now, Heatmaps
+```{r, fig.height=7, fig.width=9}
+Field.Heat<- amp_heatmap(data = LHC.RA.Mat,
+            tax.aggregate = "Order",
+            tax.add = "Phylum",
+            group = c("SampleName"),
+            tax.show = 25,
+            tax.empty = "remove",
+            plot.numbers = F,
+            plot.breaks = c(1.0,10.0,50.0),
+            max.abundance = 50,
+            min.abundance = 1,
+            order.x = c("LHC15.1.A.M1","LHC15.1.A.M2","LHC15.1.A.M3","LHC15.1.B.M1","LHC15.1.B.M2","LHC15.1.B.M3","LHC15.1.C.M1","LHC15.1.C.M2","LHC15.1.C.M3","LHC15.1.D.M1","LHC15.1.D.M2","LHC15.1.D.M3"),
+            scale.seq = 100) + 
+    scale_x_discrete(labels = c("Layer A 1","Layer A 2","Layer A 3","Layer B 1","Layer B 2","Layer B 3","Layer C 1","Layer C 2","Layer C 3","Layer D1","Layer D 2","Layer D 3")) +
+    theme(axis.text.x = element_text(size =6, color = "black", hjust = 0.4, angle = 0)) + theme(axis.text.y = element_text(size =6, color = "black", angle = 0))
+
+Incubation.Heat <- amp_heatmap(data = LHC.RA.Incubation,
+            tax.aggregate = "Order",
+            tax.add = "Phylum",
+            group = c("SampleName"),
+            tax.show = 25,
+            tax.empty = "remove",
+            plot.numbers = F,
+            plot.breaks = c(1.0,10.0,50.0),
+            max.abundance = 50,
+            min.abundance = 1,
+            order.x = c("Mat A 0h","Mat A 24h","Mat B 0h","Mat B 24h","Mat C 0h","Mat C 24h","Mat D 0h","Mat D 24h"),
+            scale.seq = 100) + 
+    scale_x_discrete(labels = c("Mat A 0h","Mat A 24h","Mat B 0h","Mat B 24h","Mat C 0h","Mat C 24h","Mat D 0h","Mat D 24h")) +
+    theme(axis.text.x = element_text(size =6, color = "black", hjust = 0.4, angle = 0)) + theme(axis.text.y = element_text(size =6, color = "black", angle = 0))
+
+plot_grid(Field.Heat,Incubation.Heat, labels = c("A", "B"), rel_widths = c(1,1),nrow = 2, align = "v")
+```
+
+Next I'd like to test if the layers of the mat are significantly different. I'll use the ADONIS test. 
+```{r}
+LHC.Rare.Mat.Data = as(sample_data(LHC.Rare.Mat), "data.frame")
+Mat.BA.d = phyloseq::distance(LHC.Rare.Mat, "wunifrac")
+adonis(Mat.BA.d ~ SampleSite, LHC.Rare.Mat.Data)
+```
+
+The answer is yes, with a highly significant p value, and a very high R2 value. 
+
+Next, as additional information, not included in the publication, we'll ordinate the samples, both showing what taxa are most associated with what sites, and a more clean ordination without taxa shown. 
+```{r}
+cols <- c("LHC.1.Mat.A" = "blue", "LHC.1.Mat.B" = "purple", "LHC.1.Mat.C" = "red", "LHC.1.Mat.D" = "black")
+```
+
+```{r}
+LHC.Mat.PCA<-amp_ordinate(data = LHC.Rare.Mat,
+plot.color = "SampleSite",
+plot.group = "chull",
+plot.nspecies = 10,
+plot.nspecies.repel=T,
+plot.point.size = 1)
+LHC.Mat.PCA + scale_colour_manual(values = cols) + scale_fill_manual(values = cols) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+
+
+
+
+```{r}
+LHC.Mat.PCA.2<-amp_ordinate(data = LHC.Rare.Mat,
+plot.color = "SampleSite",
+plot.point.size = 1)
+LHC.Mat.PCA.2 + scale_colour_manual(values = cols) + scale_fill_manual(values = cols) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
